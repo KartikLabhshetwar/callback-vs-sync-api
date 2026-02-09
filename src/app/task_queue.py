@@ -60,33 +60,61 @@ class AsyncTaskQueue:
 
             self._active_count += 1
             try:
-                # Run CPU work in a thread — hashlib releases GIL
-                work_result = await asyncio.to_thread(compute_work, input_data, iterations)
-
-                await update_request_result(
-                    request_id, "completed", work_result["result"], work_result["duration_ms"]
-                )
-
-                payload = {
-                    "request_id": request_id,
-                    "status": "completed",
-                    "result": work_result["result"],
-                    "iterations": work_result["iterations"],
-                    "duration_ms": work_result["duration_ms"],
-                }
-                await deliver_callback(request_id, callback_url, payload)
-
-            except Exception:
-                logger.exception("Worker %d error processing %s", worker_id, request_id)
-                try:
-                    await update_request_result(request_id, "failed", "", 0)
-                except Exception:
-                    logger.exception("Failed to update error status for %s", request_id)
+                await self._process_task(worker_id, request_id, input_data, iterations, callback_url)
             finally:
                 self._active_count -= 1
                 self._queue.task_done()
 
         logger.info("Worker %d stopped", worker_id)
+
+    async def _process_task(
+        self, worker_id: int, request_id: str, input_data: str, iterations: int, callback_url: str
+    ) -> None:
+        """Process a single task: compute work, update DB, deliver callback."""
+        # --- Step 1: Compute work ---
+        try:
+            work_result = await asyncio.to_thread(compute_work, input_data, iterations)
+        except Exception:
+            logger.exception("Worker %d: compute_work failed for %s", worker_id, request_id)
+            await self._handle_failure(request_id, callback_url, "Work computation failed")
+            return
+
+        # --- Step 2: Update DB ---
+        try:
+            await update_request_result(
+                request_id, "completed", work_result["result"], work_result["duration_ms"]
+            )
+        except Exception:
+            logger.exception("Worker %d: DB update failed for %s", worker_id, request_id)
+            # Still deliver callback — the work was done, even if DB is inconsistent
+
+        # --- Step 3: Deliver callback ---
+        payload = {
+            "request_id": request_id,
+            "status": "completed",
+            "result": work_result["result"],
+            "iterations": work_result["iterations"],
+            "duration_ms": work_result["duration_ms"],
+        }
+        await deliver_callback(request_id, callback_url, payload)
+
+    async def _handle_failure(self, request_id: str, callback_url: str, error_msg: str) -> None:
+        """Update DB to failed and deliver error callback."""
+        try:
+            await update_request_result(request_id, "failed", "", 0)
+        except Exception:
+            logger.exception("Failed to update error status for %s", request_id)
+
+        # Deliver error callback so the client knows about the failure
+        error_payload = {
+            "request_id": request_id,
+            "status": "failed",
+            "error": error_msg,
+        }
+        try:
+            await deliver_callback(request_id, callback_url, error_payload)
+        except Exception:
+            logger.exception("Failed to deliver error callback for %s", request_id)
 
     async def shutdown(self, timeout: float = 30.0) -> None:
         """Graceful shutdown: signal workers, drain queue, cancel stragglers."""

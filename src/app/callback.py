@@ -96,8 +96,11 @@ async def deliver_callback(
         except SSRFError as e:
             error_msg = f"SSRF blocked: {e}"
             elapsed_ms = round((time.monotonic() - start) * 1000, 2)
-            await insert_callback_attempt(request_id, attempt, None, error_msg, elapsed_ms)
-            await update_callback_status(request_id, "failed", attempt, error_msg)
+            try:
+                await insert_callback_attempt(request_id, attempt, None, error_msg, elapsed_ms)
+                await update_callback_status(request_id, "failed", attempt, error_msg)
+            except Exception:
+                logger.exception("DB error logging SSRF failure for %s", request_id)
             logger.warning("SSRF blocked for request %s: %s", request_id, e)
             return  # permanent fail — do not retry
 
@@ -119,10 +122,13 @@ async def deliver_callback(
                 elapsed_ms = round((time.monotonic() - start) * 1000, 2)
 
                 if 200 <= status_code < 300:
-                    await insert_callback_attempt(
-                        request_id, attempt, status_code, None, elapsed_ms
-                    )
-                    await update_callback_status(request_id, "delivered", attempt)
+                    try:
+                        await insert_callback_attempt(
+                            request_id, attempt, status_code, None, elapsed_ms
+                        )
+                        await update_callback_status(request_id, "delivered", attempt)
+                    except Exception:
+                        logger.exception("DB error logging success for %s", request_id)
                     logger.info(
                         "Callback delivered for %s on attempt %d (%dms)",
                         request_id, attempt, elapsed_ms,
@@ -139,7 +145,10 @@ async def deliver_callback(
             error_msg = f"Unexpected error: {e}"
 
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
-        await insert_callback_attempt(request_id, attempt, status_code, error_msg, elapsed_ms)
+        try:
+            await insert_callback_attempt(request_id, attempt, status_code, error_msg, elapsed_ms)
+        except Exception:
+            logger.exception("DB error logging attempt %d for %s", attempt, request_id)
         logger.warning(
             "Callback attempt %d/%d failed for %s: %s",
             attempt, max_retries, request_id, error_msg,
@@ -151,9 +160,12 @@ async def deliver_callback(
             await _sleep(delay + jitter)
 
     # All retries exhausted
-    await update_callback_status(
-        request_id, "failed", max_retries, f"All {max_retries} attempts failed"
-    )
+    try:
+        await update_callback_status(
+            request_id, "failed", max_retries, f"All {max_retries} attempts failed"
+        )
+    except Exception:
+        logger.exception("DB error logging final failure for %s", request_id)
     logger.error("Callback delivery failed for %s after %d attempts", request_id, max_retries)
 
 

@@ -7,6 +7,9 @@ from starlette.responses import JSONResponse
 
 from app.config import settings
 
+# Module-level shared state so the cleanup task can access it
+_requests: dict[str, list[float]] = defaultdict(list)
+
 
 class SlidingWindowRateLimiter(BaseHTTPMiddleware):
     """Sliding window rate limiter, per client IP.
@@ -19,7 +22,6 @@ class SlidingWindowRateLimiter(BaseHTTPMiddleware):
         super().__init__(app)
         self.max_requests = max_requests or settings.rate_limit_requests
         self.window_seconds = window_seconds or settings.rate_limit_window
-        self._requests: dict[str, list[float]] = defaultdict(list)
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path == "/healthz":
@@ -30,9 +32,9 @@ class SlidingWindowRateLimiter(BaseHTTPMiddleware):
         cutoff = now - self.window_seconds
 
         # Slide the window: drop old timestamps
-        timestamps = self._requests[client_ip]
-        self._requests[client_ip] = [t for t in timestamps if t > cutoff]
-        timestamps = self._requests[client_ip]
+        timestamps = _requests[client_ip]
+        _requests[client_ip] = [t for t in timestamps if t > cutoff]
+        timestamps = _requests[client_ip]
 
         if len(timestamps) >= self.max_requests:
             retry_after = int(self.window_seconds - (now - timestamps[0])) + 1
@@ -45,14 +47,16 @@ class SlidingWindowRateLimiter(BaseHTTPMiddleware):
         timestamps.append(now)
         return await call_next(request)
 
-    def cleanup_stale(self) -> int:
-        """Remove entries for IPs with no recent requests. Returns count removed."""
-        now = time.monotonic()
-        cutoff = now - self.window_seconds
-        stale_keys = [
-            ip for ip, timestamps in self._requests.items()
-            if not timestamps or all(t <= cutoff for t in timestamps)
-        ]
-        for key in stale_keys:
-            del self._requests[key]
-        return len(stale_keys)
+
+def cleanup_stale_entries() -> int:
+    """Remove entries for IPs with no recent requests. Returns count removed."""
+    now = time.monotonic()
+    window = settings.rate_limit_window
+    cutoff = now - window
+    stale_keys = [
+        ip for ip, timestamps in _requests.items()
+        if not timestamps or all(t <= cutoff for t in timestamps)
+    ]
+    for key in stale_keys:
+        del _requests[key]
+    return len(stale_keys)

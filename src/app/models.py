@@ -8,7 +8,7 @@ class SyncRequest(BaseModel):
 
 class AsyncRequest(BaseModel):
     input_data: str = Field(..., min_length=1, max_length=10_000)
-    callback_url: str = Field(..., min_length=1)
+    callback_url: str = Field(..., min_length=1, max_length=2048)
     iterations: int | None = Field(None, ge=1, le=1_000_000)
 
 

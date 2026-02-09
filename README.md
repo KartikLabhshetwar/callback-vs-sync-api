@@ -1,57 +1,45 @@
-# Sync API vs Async (Callback) API Under Request Storms
+# Sync vs Async (Callback) API Under Request Storms
 
-A Python backend (FastAPI + uv) that compares synchronous vs asynchronous (callback-based) request handling under high load. Demonstrates production patterns: error handling, callback retry logic, SSRF prevention, back-pressure, and graceful shutdown.
+Compare what happens when a server handles requests synchronously (blocking) vs asynchronously (callback-based) under high load.
 
-## Architecture
+**Tech stack**: Python, FastAPI, SQLite, asyncio
+
+## How It Works
 
 ```
-                         ┌──────────────────────────────────┐
-                         │           FastAPI App             │
-                         │                                  │
-  POST /sync ──────────► │  compute_work() ─── blocks ───► │ ──► Response
-                         │  (on event loop)                 │
-                         │                                  │
-  POST /async ─────────► │  enqueue ──► Task Queue ─────── │ ──► 202 Accepted
-                         │              │                   │
-                         │              ▼                   │
-                         │         Worker Pool              │
-                         │    asyncio.to_thread()           │
-                         │         compute_work()           │
-                         │              │                   │
-                         │              ▼                   │
-                         │      deliver_callback()          │
-                         │    (retry + SSRF guard)          │
-                         └──────────────────────────────────┘
-                                        │
-                                        ▼
-                              Callback Receiver
+  POST /sync ──> Server does work ──> Returns result (client waits entire time)
+
+  POST /async ──> Server says "got it" (202) ──> Client is free
+                       |
+                       └──> Background worker does work ──> Calls your callback URL with result
 ```
 
-**Sync path**: `compute_work()` runs directly on the event loop, intentionally blocking it. Under concurrent load, requests queue up behind each other.
-
-**Async path**: Work is enqueued to a bounded `asyncio.Queue`, processed by workers via `asyncio.to_thread()` (hashlib releases the GIL), and results are delivered via callback with exponential backoff retry.
+**Sync** blocks the event loop. Under load, request #200 waits for all 199 before it.
+**Async** returns instantly. Work happens in background threads, results delivered via callback.
 
 ## Quick Start
 
 ```bash
-# Install dependencies
-uv sync
-
-# Copy and configure environment
+# 1. Install
+uv sync --extra dev
 cp .env.example .env
 
-# Run the server
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 2. Start server
+uv run uvicorn app.main:app --port 8000
 
-# Run load test (both modes)
+# 3. Run tests (30 tests)
+uv run pytest tests/ -v
+
+# 4. Run load test (in a new terminal)
 uv run python -m loadgen.cli --num-requests 200 --concurrency 30
 ```
 
-## API Reference
+No Docker, no Redis, no Postgres. Everything runs locally with zero external deps.
+
+## API Endpoints
 
 ### POST /sync
-Synchronous processing. Blocks until complete.
-
+Send data, wait for result.
 ```bash
 curl -X POST localhost:8000/sync \
   -H 'Content-Type: application/json' \
@@ -59,111 +47,112 @@ curl -X POST localhost:8000/sync \
 ```
 
 ### POST /async
-Asynchronous processing. Returns 202 immediately, delivers result via callback.
-
+Send data + callback URL, get instant 202 back, receive result later at your URL.
 ```bash
 curl -X POST localhost:8000/async \
   -H 'Content-Type: application/json' \
   -d '{"input_data": "hello", "callback_url": "http://localhost:9000/callback", "iterations": 50000}'
 ```
 
-### GET /requests
-List requests with optional filtering.
-
-```bash
-curl "localhost:8000/requests?mode=sync&limit=10"
-```
+### GET /requests?mode=sync|async
+List recent requests. Filter by mode, paginate with `limit` and `offset`.
 
 ### GET /requests/{id}
-Get request detail including callback delivery trace.
+Full request detail. For async requests, includes `delivery_trace` showing every callback attempt.
 
 ### GET /healthz
-Health check with queue depth, active workers, and uptime.
-
-## Configuration
-
-All settings use the `CONSUMA_` env prefix:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CONSUMA_DEFAULT_ITERATIONS` | 50000 | SHA-256 iterations per request |
-| `CONSUMA_MAX_WORKERS` | 4 | Async task queue worker count |
-| `CONSUMA_MAX_QUEUE_SIZE` | 1000 | Bounded queue size (back-pressure) |
-| `CONSUMA_CALLBACK_TIMEOUT` | 10 | Callback delivery timeout (seconds) |
-| `CONSUMA_CALLBACK_MAX_RETRIES` | 5 | Max callback delivery attempts |
-| `CONSUMA_RATE_LIMIT_REQUESTS` | 500 | Requests per window per IP |
-| `CONSUMA_RATE_LIMIT_WINDOW` | 60 | Rate limit window (seconds) |
-| `CONSUMA_ALLOW_PRIVATE_CALLBACKS` | true | Allow callbacks to private IPs (disable in production) |
-| `CONSUMA_DATABASE_PATH` | requests.db | SQLite database path |
+Server health: queue depth, active workers, DB status, uptime.
 
 ## Load Generator
 
+The built-in load tester fires requests at both endpoints and compares:
+
 ```bash
-uv run python -m loadgen.cli --help
+uv run python -m loadgen.cli --num-requests 200 --concurrency 30
 ```
 
-Options:
-- `--server-url`: API server URL (default: http://localhost:8000)
-- `--num-requests`: Total requests (default: 100)
-- `--concurrency`: Concurrent requests (default: 20)
-- `--mode`: sync, async, or both (default: both)
-- `--iterations`: SHA-256 iterations (default: 10000)
-- `--callback-port`: Callback receiver port (default: 9000)
-- `--timeout`: Request timeout seconds (default: 120)
+**What it shows:**
+
+| Column | Meaning |
+|--------|---------|
+| Sync (response) | How long the client waited for each sync request |
+| Async (accept) | How fast the server returned 202 (client freed instantly) |
+| Async (callback) | Total time until callback arrived (includes queue + work + delivery) |
+
+Options: `--mode sync|async|both`, `--iterations`, `--callback-port`, `--timeout`
 
 ## Design Decisions
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Work function | SHA-256 iterations | Deterministic, CPU-bound, GIL-releasing (hashlib/OpenSSL) |
-| Database | SQLite + aiosqlite + WAL | Zero external deps. Use PostgreSQL in production |
-| Task queue | In-process asyncio.Queue | No Redis needed. Use ARQ/Celery in production |
-| CPU work (async) | `asyncio.to_thread()` | hashlib releases GIL = real parallelism |
-| Callback retry | Exponential backoff + jitter | Prevents thundering herd |
-| SSRF protection | DNS resolve + IP blocklist + no redirects | Multi-layer, re-validates at delivery |
-| Rate limiting | Sliding window per-IP | Avoids burst-at-boundary problem |
-| Back-pressure | Bounded queue + 503 | Prevents OOM under load |
+| What | Choice | Why |
+|------|--------|-----|
+| "Work" function | SHA-256 hashing (N rounds) | Deterministic, CPU-bound, releases the GIL so threads get real parallelism |
+| Database | SQLite + aiosqlite (WAL mode) | Zero deps. Swap for PostgreSQL in production |
+| Task queue | asyncio.Queue (bounded) | No Redis needed. Swap for ARQ/Celery in production |
+| Async CPU work | `asyncio.to_thread()` | Runs in real OS thread. hashlib releases GIL = actual parallelism |
+| Callback retry | Exponential backoff + jitter | Retries at 2s, 4s, 8s, 16s, 32s. Jitter prevents thundering herd |
+| SSRF protection | DNS resolve + IP blocklist + no redirects | Blocks private IPs, re-validates at delivery time (DNS rebinding defense) |
+| Rate limiting | Sliding window per-IP | Returns 429 + Retry-After. Avoids burst-at-boundary problem |
+| Back-pressure | Bounded queue + 503 | Queue full = 503 with Retry-After. Prevents OOM |
 
-## Known Limitations
+## Protection Features
 
-- **SQLite write contention**: WAL mode mitigates but doesn't eliminate under heavy concurrent writes
-- **In-memory rate limiter**: Not suitable for multi-process deployment; use Redis in production
-- **No callback ordering guarantee**: Retries can cause out-of-order delivery (timestamps included in payload)
-- **Mid-delivery data loss**: Tasks in-flight during shutdown may not complete. Document for production
+- **SSRF**: Callback URLs validated against private IP ranges, bad schemes blocked, redirects disabled, re-validated at delivery time
+- **Rate limiting**: 500 req/60s per IP (configurable). Skips /healthz
+- **Back-pressure**: Bounded queue returns 503 when full
+- **Input validation**: Max payload 10KB, max callback URL 2048 chars, max iterations 1M
+- **Error handling**: Both sync and async paths catch failures, update DB status, deliver error callbacks
+
+## Configuration
+
+All env vars use `CONSUMA_` prefix. Copy `.env.example` to `.env` to configure:
+
+| Variable | Default | What it does |
+|----------|---------|-------------|
+| `CONSUMA_DEFAULT_ITERATIONS` | 50000 | SHA-256 rounds per request |
+| `CONSUMA_MAX_WORKERS` | 4 | Background worker threads |
+| `CONSUMA_MAX_QUEUE_SIZE` | 1000 | Queue capacity (503 when full) |
+| `CONSUMA_CALLBACK_MAX_RETRIES` | 5 | Retry attempts for failed callbacks |
+| `CONSUMA_RATE_LIMIT_REQUESTS` | 500 | Requests per window per IP |
+| `CONSUMA_ALLOW_PRIVATE_CALLBACKS` | true | Allow localhost callbacks (disable in production) |
 
 ## Testing
 
 ```bash
-uv run pytest tests/ -v
+uv run pytest tests/ -v    # 30 tests
 ```
+
+| Test file | What it covers |
+|-----------|---------------|
+| `test_work.py` | SHA-256 determinism, output format, timing |
+| `test_sync.py` | Sync endpoint correctness, defaults, validation, DB persistence |
+| `test_async.py` | 202 acceptance, validation, DB persistence |
+| `test_callback.py` | SSRF blocking (private IPs, bad schemes, no hostname) |
+| `test_edge_cases.py` | 404s, queue full 503, input boundaries, rate limiting, mode filtering |
 
 ## Project Structure
 
 ```
 src/app/
-  main.py              # FastAPI app, lifespan, middleware
-  config.py            # Pydantic Settings (env-driven)
-  models.py            # Request/response schemas
-  database.py          # aiosqlite CRUD helpers
-  work.py              # SHA-256 compute work
-  callback.py          # Callback delivery with SSRF guard
-  task_queue.py        # Bounded async task queue + workers
-  rate_limit.py        # Sliding window rate limiter
+  main.py            # App setup, lifespan (startup/shutdown), middleware
+  config.py          # Env-driven settings (CONSUMA_ prefix)
+  work.py            # SHA-256 work function (shared by both paths)
+  database.py        # SQLite with WAL mode
+  models.py          # Pydantic request/response schemas
+  callback.py        # SSRF validation + retry delivery
+  task_queue.py      # Bounded queue + worker pool
+  rate_limit.py      # Sliding window rate limiter
   routes/
-    sync_route.py      # POST /sync
-    async_route.py     # POST /async
-    requests_route.py  # GET /requests, GET /requests/{id}
-    health.py          # GET /healthz
+    sync_route.py    # POST /sync
+    async_route.py   # POST /async
+    requests_route.py # GET /requests, GET /requests/{id}
+    health.py        # GET /healthz
 
-loadgen/
-  cli.py               # Click CLI entrypoint
-  runner.py            # Load test orchestrator
-  callback_server.py   # Callback receiver
-  stats.py             # Percentile computation + report
-
-tests/
-  test_sync.py         # Sync endpoint tests
-  test_async.py        # Async endpoint tests
-  test_callback.py     # SSRF validation tests
-  test_work.py         # Work function tests
+loadgen/               # Load test CLI
+tests/                 # 30 automated tests
 ```
+
+## Known Limitations
+
+- **SQLite**: WAL helps but doesn't eliminate write contention under extreme load. Use PostgreSQL in production.
+- **In-memory rate limiter**: Per-process only. Use Redis for multi-worker deployments.
+- **No callback ordering**: Retries can deliver out-of-order. Timestamps included in payload for client-side ordering.

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.database import close_db, init_db
-from app.rate_limit import SlidingWindowRateLimiter
+from app.rate_limit import SlidingWindowRateLimiter, cleanup_stale_entries
 from app.routes.async_route import router as async_router
 from app.routes.health import router as health_router
 from app.routes.health import set_start_time
@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized, task queue started")
 
     # Periodic rate-limiter cleanup
-    cleanup_task = asyncio.create_task(_periodic_cleanup(app))
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
 
     yield
 
@@ -47,15 +47,13 @@ async def lifespan(app: FastAPI):
     logger.info("Graceful shutdown complete")
 
 
-async def _periodic_cleanup(app: FastAPI) -> None:
+async def _periodic_cleanup() -> None:
     """Clean up stale rate-limiter entries every 60 seconds."""
     while True:
         await asyncio.sleep(60)
-        for middleware in app.user_middleware:
-            if hasattr(middleware, "cls") and middleware.cls is SlidingWindowRateLimiter:
-                # Access via the middleware stack isn't straightforward;
-                # the cleanup is best-effort for long-running servers
-                pass
+        removed = cleanup_stale_entries()
+        if removed > 0:
+            logger.debug("Rate limiter cleanup: removed %d stale entries", removed)
 
 
 app = FastAPI(
