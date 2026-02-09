@@ -91,9 +91,9 @@ All settings use the `CONSUMA_` env prefix:
 | `CONSUMA_MAX_QUEUE_SIZE` | 1000 | Bounded queue size (back-pressure) |
 | `CONSUMA_CALLBACK_TIMEOUT` | 10 | Callback delivery timeout (seconds) |
 | `CONSUMA_CALLBACK_MAX_RETRIES` | 5 | Max callback delivery attempts |
-| `CONSUMA_RATE_LIMIT_REQUESTS` | 100 | Requests per window per IP |
+| `CONSUMA_RATE_LIMIT_REQUESTS` | 500 | Requests per window per IP |
 | `CONSUMA_RATE_LIMIT_WINDOW` | 60 | Rate limit window (seconds) |
-| `CONSUMA_ALLOW_PRIVATE_CALLBACKS` | false | Allow callbacks to private IPs |
+| `CONSUMA_ALLOW_PRIVATE_CALLBACKS` | true | Allow callbacks to private IPs (disable in production) |
 | `CONSUMA_DATABASE_PATH` | requests.db | SQLite database path |
 
 ## Load Generator
