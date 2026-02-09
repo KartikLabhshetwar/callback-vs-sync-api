@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections import Counter
 
 import httpx
 
@@ -12,11 +13,16 @@ async def run_sync_test(
     concurrency: int,
     iterations: int,
     timeout: float,
-) -> tuple[list[float], int]:
-    """Fire N sync requests with bounded concurrency. Returns (latencies_ms, error_count)."""
+) -> tuple[list[float], int, Counter]:
+    """Fire N sync requests with bounded concurrency.
+
+    Returns (latencies_ms, error_count, error_details).
+    error_details is a Counter of "status_code: reason" strings.
+    """
     semaphore = asyncio.Semaphore(concurrency)
     latencies: list[float] = []
     errors = 0
+    error_details: Counter = Counter()
     lock = asyncio.Lock()
 
     async def send_one(i: int, client: httpx.AsyncClient) -> None:
@@ -34,17 +40,24 @@ async def run_sync_test(
                     async with lock:
                         latencies.append(elapsed)
                 else:
+                    detail = _extract_error(resp)
                     async with lock:
                         errors += 1
-            except Exception:
+                        error_details[f"{resp.status_code}: {detail}"] += 1
+            except httpx.TimeoutException:
                 async with lock:
                     errors += 1
+                    error_details["timeout"] += 1
+            except Exception as e:
+                async with lock:
+                    errors += 1
+                    error_details[f"exception: {type(e).__name__}"] += 1
 
     async with httpx.AsyncClient() as client:
         tasks = [send_one(i, client) for i in range(num_requests)]
         await asyncio.gather(*tasks)
 
-    return latencies, errors
+    return latencies, errors, error_details
 
 
 async def run_async_test(
@@ -55,16 +68,17 @@ async def run_async_test(
     callback_url: str,
     timeout: float,
     callback_wait: float = 60.0,
-) -> tuple[list[float], list[float], int, int]:
+) -> tuple[list[float], list[float], int, int, Counter]:
     """Fire N async requests and wait for callbacks.
 
-    Returns (accept_latencies_ms, callback_latencies_ms, error_count, missing_callbacks).
+    Returns (accept_latencies_ms, callback_latencies_ms, error_count, missing_callbacks, error_details).
     """
     clear_received()
     semaphore = asyncio.Semaphore(concurrency)
     accept_latencies: list[float] = []
     send_times: dict[str, float] = {}  # request_id -> wall clock send time
     errors = 0
+    error_details: Counter = Counter()
     lock = asyncio.Lock()
 
     async def send_one(i: int, client: httpx.AsyncClient) -> None:
@@ -90,11 +104,18 @@ async def run_async_test(
                         accept_latencies.append(elapsed)
                         send_times[request_id] = send_wall
                 else:
+                    detail = _extract_error(resp)
                     async with lock:
                         errors += 1
-            except Exception:
+                        error_details[f"{resp.status_code}: {detail}"] += 1
+            except httpx.TimeoutException:
                 async with lock:
                     errors += 1
+                    error_details["timeout"] += 1
+            except Exception as e:
+                async with lock:
+                    errors += 1
+                    error_details[f"exception: {type(e).__name__}"] += 1
 
     async with httpx.AsyncClient() as client:
         tasks = [send_one(i, client) for i in range(num_requests)]
@@ -121,4 +142,16 @@ async def run_async_test(
         else:
             missing += 1
 
-    return accept_latencies, callback_latencies, errors, missing
+    return accept_latencies, callback_latencies, errors, missing, error_details
+
+
+def _extract_error(resp: httpx.Response) -> str:
+    """Extract a short error description from an HTTP response."""
+    try:
+        body = resp.json()
+        if "detail" in body:
+            msg = str(body["detail"])
+            return msg[:80]
+    except Exception:
+        pass
+    return resp.reason_phrase or "unknown"

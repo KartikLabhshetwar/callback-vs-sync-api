@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from collections import Counter
 
 import click
 import uvicorn
@@ -59,28 +60,37 @@ def main(
     sync_errors = 0
     async_errors = 0
     missing_callbacks = 0
+    all_error_details: Counter = Counter()
 
     if mode in ("sync", "both"):
         console.print("[bold red]Running sync test...[/bold red]")
-        latencies, sync_errors = asyncio.run(
+        latencies, sync_errors, sync_err_details = asyncio.run(
             run_sync_test(server_url, num_requests, concurrency, iterations, timeout)
         )
+        all_error_details.update(sync_err_details)
         sync_stats = compute_percentiles(latencies)
         console.print(f"  Done: {len(latencies)} successful, {sync_errors} errors")
+        if sync_err_details:
+            for err, count in sync_err_details.most_common():
+                console.print(f"    [dim]{count}x {err}[/dim]")
 
     if mode in ("async", "both"):
         console.print("[bold green]Running async test...[/bold green]")
-        accept_lat, cb_lat, async_errors, missing_callbacks = asyncio.run(
+        accept_lat, cb_lat, async_errors, missing_callbacks, async_err_details = asyncio.run(
             run_async_test(
                 server_url, num_requests, concurrency, iterations, callback_url, timeout
             )
         )
+        all_error_details.update(async_err_details)
         async_accept_stats = compute_percentiles(accept_lat)
         async_callback_stats = compute_percentiles(cb_lat)
         console.print(
             f"  Done: {len(accept_lat)} accepted, {len(cb_lat)} callbacks received, "
             f"{async_errors} errors, {missing_callbacks} missing"
         )
+        if async_err_details:
+            for err, count in async_err_details.most_common():
+                console.print(f"    [dim]{count}x {err}[/dim]")
 
     print_report(
         sync_stats, async_accept_stats, async_callback_stats,
