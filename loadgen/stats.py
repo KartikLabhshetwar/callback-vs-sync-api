@@ -77,40 +77,44 @@ def print_report(
         error_table.add_row("Missing callbacks", str(async_missing_callbacks))
     console.print(error_table)
 
-    # --- Visual bar comparison of P50 ---
+    # --- Visual bar comparison of P50, P95, P99 ---
     if sync_stats and async_accept_stats and sync_stats["count"] > 0 and async_accept_stats["count"] > 0:
-        console.print()
-        all_p50 = [sync_stats["p50"], async_accept_stats["p50"]]
-        if async_callback_stats and async_callback_stats["count"] > 0:
-            all_p50.append(async_callback_stats["p50"])
-        max_val = max(all_p50) if all_p50 else 1
+        has_callback = async_callback_stats and async_callback_stats["count"] > 0
 
-        console.print("[bold]P50 Latency Visual Comparison:[/bold]")
-        console.print(
-            f"  Sync response:  {_bar(sync_stats['p50'], max_val)} {sync_stats['p50']:.0f}ms",
-            style="red",
-        )
-        console.print(
-            f"  Async accept:   {_bar(async_accept_stats['p50'], max_val)} {async_accept_stats['p50']:.0f}ms",
-            style="green",
-        )
-        if async_callback_stats and async_callback_stats["count"] > 0:
+        for percentile in ("p50", "p95", "p99"):
+            console.print()
+            values = [sync_stats[percentile], async_accept_stats[percentile]]
+            if has_callback:
+                values.append(async_callback_stats[percentile])
+            max_val = max(values) if values else 1
+
+            console.print(f"[bold]{percentile.upper()} Latency Visual Comparison:[/bold]")
             console.print(
-                f"  Async callback: {_bar(async_callback_stats['p50'], max_val)} {async_callback_stats['p50']:.0f}ms",
-                style="cyan",
+                f"  Sync response:  {_bar(sync_stats[percentile], max_val)} {sync_stats[percentile]:.0f}ms",
+                style="red",
             )
+            console.print(
+                f"  Async accept:   {_bar(async_accept_stats[percentile], max_val)} {async_accept_stats[percentile]:.0f}ms",
+                style="green",
+            )
+            if has_callback:
+                console.print(
+                    f"  Async callback: {_bar(async_callback_stats[percentile], max_val)} {async_callback_stats[percentile]:.0f}ms",
+                    style="cyan",
+                )
 
     # --- Insight panel ---
     console.print()
     insights = []
 
     if sync_stats and sync_stats["count"] > 0 and async_accept_stats and async_accept_stats["count"] > 0:
-        ratio = sync_stats["p50"] / async_accept_stats["p50"] if async_accept_stats["p50"] > 0 else 0
-        if ratio > 1:
-            insights.append(
-                f"Async accept is ~{ratio:.0f}x faster than sync response (P50). "
-                "This is because async immediately returns 202 and processes work in the background."
-            )
+        for pct in ("p50", "p95", "p99"):
+            ratio = sync_stats[pct] / async_accept_stats[pct] if async_accept_stats[pct] > 0 else 0
+            if ratio > 1:
+                insights.append(
+                    f"Async accept is ~{ratio:.0f}x faster than sync response ({pct.upper()}). "
+                    f"Sync {pct.upper()}: {sync_stats[pct]:.0f}ms vs Async accept {pct.upper()}: {async_accept_stats[pct]:.0f}ms."
+                )
 
     if async_callback_stats and async_callback_stats["count"] > 0 and sync_stats and sync_stats["count"] > 0:
         cb_ratio = async_callback_stats["p50"] / sync_stats["p50"] if sync_stats["p50"] > 0 else 0
