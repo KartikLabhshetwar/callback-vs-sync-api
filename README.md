@@ -42,6 +42,88 @@ uv run python -m loadgen.cli --num-requests 200 --concurrency 30
 
 No Docker, no Redis, no Postgres. Everything runs locally with zero external deps.
 
+## Demo (~8 minutes)
+
+Three terminals side by side. Clean slate first:
+
+```bash
+rm -f requests.db
+uv sync --extra dev
+```
+
+**Terminal 1** — Start server (allow localhost callbacks):
+```bash
+CONSUMA_ALLOW_PRIVATE_CALLBACKS=true uv run uvicorn app.main:app --port 8000
+```
+
+**Terminal 3** — Start callback receiver:
+```bash
+uv run python -c "import uvicorn; from loadgen.callback_server import app; uvicorn.run(app, port=9000, log_level='info')"
+```
+
+All demo commands below go in **Terminal 2**.
+
+### 1. Sync — client waits
+```bash
+curl -s -X POST http://localhost:8000/sync \
+  -H 'Content-Type: application/json' \
+  -d '{"input_data": "hello", "iterations": 50000}' | python3 -m json.tool
+```
+> Sync. Client sends data, server does 50k SHA-256 rounds, client waits the entire time. Under load, request #200 waits for all 199 before it.
+
+### 2. Async — client is free
+```bash
+curl -s -X POST http://localhost:8000/async \
+  -H 'Content-Type: application/json' \
+  -d '{"input_data": "hello", "callback_url": "http://localhost:9000/callback", "iterations": 50000}' | python3 -m json.tool
+```
+Check Terminal 3 — you'll see the callback arrive.
+
+> Same work, different style. Server returns 202 instantly. A background worker picks it up and POSTs the result to your callback URL when done.
+
+### 3. Show the trace
+```bash
+curl -s "http://localhost:8000/requests?mode=async" | python3 -m json.tool
+```
+Copy any `id` from the output, then:
+```bash
+curl -s http://localhost:8000/requests/PASTE_ID_HERE | python3 -m json.tool
+```
+> The delivery_trace shows every callback attempt — status code, time taken, errors. Full observability.
+
+### 4. Load test — the money shot
+Stop the callback server in Terminal 3 (Ctrl+C) — the load generator starts its own.
+```bash
+uv run python -m loadgen.cli \
+  --num-requests 200 \
+  --concurrency 30 \
+  --mode both \
+  --iterations 50000
+```
+> Sync p99 is huge — head-of-line blocking. Async accept p99 is tiny — server returned 202 almost instantly for all 200. Sync explodes under load. Async stays flat.
+
+### 5. Security
+Stop the server in Terminal 1 (Ctrl+C), restart **without** the private callbacks flag:
+```bash
+uv run uvicorn app.main:app --port 8000
+```
+Then try an SSRF attack:
+```bash
+curl -s -X POST http://localhost:8000/async \
+  -H 'Content-Type: application/json' \
+  -d '{"input_data": "hello", "callback_url": "http://169.254.169.254/latest/meta-data/"}' | python3 -m json.tool
+```
+> Blocked. That's the AWS metadata IP — classic SSRF. Private IPs are blocked by default. URLs are validated twice (at request time and before delivery) to catch DNS rebinding.
+
+```bash
+curl -s http://localhost:8000/healthz | python3 -m json.tool
+```
+
+### 6. Tests
+```bash
+uv run pytest tests/ -v
+```
+
 ## API Endpoints
 
 ### POST /sync
