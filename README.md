@@ -24,13 +24,19 @@ Compare what happens when a server handles requests synchronously (blocking) vs 
 uv sync --extra dev
 cp .env.example .env
 
-# 2. Start server
+# 2. Activate the virtual environment
+# macOS / Linux
+source .venv/bin/activate
+# Windows
+.venv\Scripts\activate
+
+# 3. Start server
 uv run uvicorn app.main:app --port 8000
 
-# 3. Run tests (30 tests)
+# 4. Run tests (30 tests)
 uv run pytest tests/ -v
 
-# 4. Run load test (in a new terminal)
+# 5. Run load test (in a new terminal)
 uv run python -m loadgen.cli --num-requests 200 --concurrency 30
 ```
 
