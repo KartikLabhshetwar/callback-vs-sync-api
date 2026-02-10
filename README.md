@@ -30,8 +30,8 @@ source .venv/bin/activate
 # Windows
 .venv\Scripts\activate
 
-# 3. Start server
-uv run uvicorn app.main:app --port 8000
+# 3. Start server (allow localhost callbacks for local testing)
+CONSUMA_ALLOW_PRIVATE_CALLBACKS=true uv run uvicorn app.main:app --port 8000
 
 # 4. Run tests (30 tests)
 uv run pytest tests/ -v

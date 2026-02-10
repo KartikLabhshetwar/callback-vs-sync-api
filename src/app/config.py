@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     callback_max_retries: int = 5
     rate_limit_requests: int = 500
     rate_limit_window: int = 60
-    allow_private_callbacks: bool = True
+    allow_private_callbacks: bool = False
     database_path: str = "requests.db"
 
 
